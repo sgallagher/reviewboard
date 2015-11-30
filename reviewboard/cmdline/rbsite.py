@@ -25,7 +25,8 @@ from django.utils.six.moves.urllib.request import urlopen
 from reviewboard import get_manual_url, get_version_string
 from reviewboard.rb_platform import (SITELIST_FILE_UNIX,
                                      DEFAULT_FS_CACHE_PATH,
-                                     INSTALLED_SITE_PATH)
+                                     INSTALLED_SITE_PATH,
+                                     DEFAULT_WEB_SERVER_USER)
 
 
 # Ignore the PendingDeprecationWarnings that we'll get from Django.
@@ -1184,6 +1185,9 @@ class InstallCommand(Command):
         group.add_option("--web-server-port",
                          help="port that the web server should listen on",
                          default='80')
+        group.add_option("--web-server-user",
+                         help="User under which the web server will run",
+                         default=DEFAULT_WEB_SERVER_USER)
         group.add_option("--python-loader",
                          default='wsgi',
                          help="python loader for apache (fastcgi or wsgi)")
@@ -1237,6 +1241,7 @@ class InstallCommand(Command):
 
             if options.advanced:
                 self.ask_web_server_type()
+                self.ask_web_server_user()
                 self.ask_python_loader()
 
             self.ask_admin_user()
@@ -1502,6 +1507,14 @@ class InstallCommand(Command):
         ui.prompt_choice(page, "Web Server", ["apache", "lighttpd"],
                          save_obj=site, save_var="web_server_type")
 
+    def ask_web_server_user(self):
+        """Ask what user the web server runs as."""
+        page = ui.page("What user does the web server run under?")
+
+        ui.prompt_input(page, "Username",
+                        site.web_server_user or DEFAULT_WEB_SERVER_USER,
+                        save_obj=site, save_var="web_server_user")
+
     def ask_python_loader(self):
         """Ask the user which Python loader they're using."""
         page = ui.page("What Python loader module will you be using?",
@@ -1590,6 +1603,12 @@ class InstallCommand(Command):
         ui.step(page, "Setting up support",
                 self.setup_support)
 
+        site.display_chown_message = True
+        if platform.system() != 'Windows' and site.web_server_user:
+            site.display_chown_message = False
+            ui.step(page, "Setting file ownership",
+                    self.chown_files)
+
     def show_finished(self):
         """Show the finished page."""
         page = ui.page("The site has been installed", allow_back=False)
@@ -1597,16 +1616,21 @@ class InstallCommand(Command):
                       site.abs_install_dir)
         ui.text(page, "Sample configuration files for web servers and "
                       "cron are available in the conf/ directory.")
-        ui.text(page, "You need to modify the ownership of the "
-                      "following directories and their contents to be owned "
-                      "by the web server:")
 
-        ui.itemized_list(page, None, [
-            os.path.join(site.abs_install_dir, 'htdocs', 'media', 'uploaded'),
-            os.path.join(site.abs_install_dir, 'htdocs', 'media', 'ext'),
-            os.path.join(site.abs_install_dir, 'htdocs', 'static', 'ext'),
-            os.path.join(site.abs_install_dir, 'data'),
-        ])
+        # If we couldn't automatically set the file ownership, inform
+        # the user of the directories that will need to have their ownership
+        # manually edited.
+        if site.display_chown_message:
+            ui.text(page, "You need to modify the ownership of the "
+                          "following directories and their contents to be owned "
+                          "by the web server:")
+
+            ui.itemized_list(page, None, [
+                os.path.join(site.abs_install_dir, 'htdocs', 'media', 'uploaded'),
+                os.path.join(site.abs_install_dir, 'htdocs', 'media', 'ext'),
+                os.path.join(site.abs_install_dir, 'htdocs', 'static', 'ext'),
+                os.path.join(site.abs_install_dir, 'data'),
+            ])
 
         ui.text(page, "For more information, visit:")
         ui.urllink(page,
@@ -1677,6 +1701,56 @@ class InstallCommand(Command):
         if site.send_support_usage_stats:
             site.register_support_page()
 
+    def chown_files(self):
+        """Own the files that need to belong to the web server"""
+        directories = [
+            os.path.join(site.abs_install_dir, 'htdocs', 'media', 'uploaded'),
+            os.path.join(site.abs_install_dir, 'htdocs', 'media', 'ext'),
+            os.path.join(site.abs_install_dir, 'htdocs', 'static', 'ext'),
+            os.path.join(site.abs_install_dir, 'data'),
+        ]
+
+        # Look up the UID and GID of the owner
+        try:
+            import pwd
+            passwd = pwd.getpwnam(site.web_server_user)
+        except KeyError:
+            ui.error("Unable to set ownership of any files.")
+            site.display_chown_message = True
+            return
+
+        uid = passwd[2]
+        gid = passwd[3]
+
+        # Recursively own all files in these directories
+        # If any of them cannot be chowned, make sure to display
+        # the list needing ownership at the end of installation
+        for path in directories:
+            for root, dirs, files in os.walk(path):
+                # chown the base directory
+                try:
+                    os.chown(root, uid, gid)
+                except OSError:
+                    ui.error("Could not set ownership of %s" % root)
+                    site.display_chown_message = True
+
+                # chown all child directories
+                for dir in dirs:
+                    joinedpath = os.path.join(root, dir)
+                    try:
+                        os.chown(joinedpath, uid, gid)
+                    except OSError:
+                        ui.error("Could not set ownership of %s" % joinedpath)
+                        site.display_chown_message = True
+
+                # chown all files in the root and all child directories
+                for file in files:
+                    joinedpath = os.path.join(root, file)
+                    try:
+                        os.chown(joinedpath, uid, gid)
+                    except OSError:
+                        ui.error("Could not set ownership of %s" % joinedpath)
+                        site.display_chown_message = True
 
 class UpgradeCommand(Command):
     """Upgrades an existing site installation.
