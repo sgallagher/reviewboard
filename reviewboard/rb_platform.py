@@ -25,3 +25,8 @@ DEFAULT_FS_CACHE_PATH = "/tmp/reviewboard_cache"
 #: tool is passed a site name instead of a full path, it will be prepended
 #: with this path.
 INSTALLED_SITE_PATH = "/var/www"
+
+# Username under which the web-server runs
+# This will be used to automatically set file ownership appropriately.
+# Disabled for upstream, but distro-packagers should set this appropriately.
+DEFAULT_WEB_SERVER_USER = ""
